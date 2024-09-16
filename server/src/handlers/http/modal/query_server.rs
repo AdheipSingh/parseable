@@ -154,6 +154,7 @@ impl QueryServer {
                 web::scope(&base_path())
                     // POST "/query" ==> Get results of the SQL query passed in request body
                     .service(Server::get_query_factory())
+                    .service(Server::get_trino_factory())
                     .service(Server::get_cache_webscope())
                     .service(Server::get_liveness_factory())
                     .service(Server::get_readiness_factory())
@@ -165,6 +166,7 @@ impl QueryServer {
                     .service(Server::get_llm_webscope())
                     .service(Server::get_oauth_webscope(oidc_client))
                     .service(Server::get_user_role_webscope())
+                    .service(Server::get_metrics_webscope())
                     .service(Self::get_cluster_web_scope()),
             )
             .service(Server::get_generated());

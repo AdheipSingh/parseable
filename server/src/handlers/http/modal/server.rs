@@ -24,6 +24,7 @@ use crate::handlers::http::base_path;
 use crate::handlers::http::cache;
 use crate::handlers::http::health_check;
 use crate::handlers::http::query;
+use crate::handlers::http::trino;
 use crate::handlers::http::users::dashboards;
 use crate::handlers::http::users::filters;
 use crate::handlers::http::API_BASE_PATH;
@@ -169,6 +170,7 @@ impl Server {
                 web::scope(&base_path())
                     // POST "/query" ==> Get results of the SQL query passed in request body
                     .service(Self::get_query_factory())
+                    .service(Self::get_trino_factory())
                     .service(Self::get_cache_webscope())
                     .service(Self::get_ingest_factory())
                     .service(Self::get_liveness_factory())
@@ -180,50 +182,58 @@ impl Server {
                     .service(Self::get_filters_webscope())
                     .service(Self::get_llm_webscope())
                     .service(Self::get_oauth_webscope(oidc_client))
-                    .service(Self::get_user_role_webscope()),
+                    .service(Self::get_user_role_webscope())
+                    .service(Self::get_metrics_webscope()),
             )
             .service(Self::get_ingest_otel_factory())
             .service(Self::get_generated());
+    }
+
+    // get the trino factory
+    pub fn get_trino_factory() -> Resource {
+        web::resource("/trinoquery")
+            .route(web::post().to(trino::trino_query).authorize(Action::Query))
+    }
+
+    pub fn get_metrics_webscope() -> Scope {
+        web::scope("/metrics").service(
+            web::resource("").route(web::get().to(metrics::get).authorize(Action::Metrics)),
+        )
     }
 
     // get the dashboards web scope
     pub fn get_dashboards_webscope() -> Scope {
         web::scope("/dashboards")
             .service(
-                web::resource("").route(
-                    web::post()
-                        .to(dashboards::post)
-                        .authorize(Action::CreateDashboard),
-                ),
-            )
-            .service(
-                web::scope("/dashboard").service(
-                    web::resource("/{dashboard_id}")
-                        .route(
-                            web::get()
-                                .to(dashboards::get)
-                                .authorize(Action::GetDashboard),
-                        )
-                        .route(
-                            web::delete()
-                                .to(dashboards::delete)
-                                .authorize(Action::DeleteDashboard),
-                        )
-                        .route(
-                            web::put()
-                                .to(dashboards::update)
-                                .authorize(Action::CreateDashboard),
-                        ),
-                ),
-            )
-            .service(
-                web::scope("/{user_id}").service(
-                    web::resource("").route(
+                web::resource("")
+                    .route(
+                        web::post()
+                            .to(dashboards::post)
+                            .authorize(Action::CreateDashboard),
+                    )
+                    .route(
                         web::get()
                             .to(dashboards::list)
                             .authorize(Action::ListDashboard),
                     ),
-                ),
+            )
+            .service(
+                web::resource("/{dashboard_id}")
+                    .route(
+                        web::get()
+                            .to(dashboards::get)
+                            .authorize(Action::GetDashboard),
+                    )
+                    .route(
+                        web::delete()
+                            .to(dashboards::delete)
+                            .authorize(Action::DeleteDashboard),
+                    )
+                    .route(
+                        web::put()
+                            .to(dashboards::update)
+                            .authorize(Action::CreateDashboard),
+                    ),
             )
     }
 
@@ -231,31 +241,28 @@ impl Server {
     pub fn get_filters_webscope() -> Scope {
         web::scope("/filters")
             .service(
-                web::resource("").route(
-                    web::post()
-                        .to(filters::post)
-                        .authorize(Action::CreateFilter),
-                ),
+                web::resource("")
+                    .route(
+                        web::post()
+                            .to(filters::post)
+                            .authorize(Action::CreateFilter),
+                    )
+                    .route(web::get().to(filters::list).authorize(Action::ListFilter)),
             )
             .service(
-                web::scope("/filter").service(
-                    web::resource("/{filter_id}")
-                        .route(web::get().to(filters::get).authorize(Action::GetFilter))
-                        .route(
-                            web::delete()
-                                .to(filters::delete)
-                                .authorize(Action::DeleteFilter),
-                        )
-                        .route(
-                            web::put()
-                                .to(filters::update)
-                                .authorize(Action::CreateFilter),
-                        ),
-                ),
+                web::resource("/{filter_id}")
+                    .route(web::get().to(filters::get).authorize(Action::GetFilter))
+                    .route(
+                        web::delete()
+                            .to(filters::delete)
+                            .authorize(Action::DeleteFilter),
+                    )
+                    .route(
+                        web::put()
+                            .to(filters::update)
+                            .authorize(Action::CreateFilter),
+                    ),
             )
-            .service(web::scope("/{user_id}").service(
-                web::resource("").route(web::get().to(filters::list).authorize(Action::ListFilter)),
-            ))
     }
 
     // get the query factory
@@ -312,7 +319,7 @@ impl Server {
                         web::resource("/info").route(
                             web::get()
                                 .to(logstream::get_stream_info)
-                                .authorize_for_stream(Action::GetStream),
+                                .authorize_for_stream(Action::GetStreamInfo),
                         ),
                     )
                     .service(
