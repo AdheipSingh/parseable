@@ -426,6 +426,8 @@ impl TableProvider for StandardTableProvider {
                 .await?;
             }
         }
+
+
         if manifest_files.is_empty() {
             QUERY_CACHE_HIT.with_label_values(&[&self.stream]).inc();
             return final_plan(
@@ -548,12 +550,17 @@ async fn get_hottier_exectuion_plan(
     state: &SessionState,
     time_partition: Option<String>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    println!("manifest_files: {:?}", manifest_files.len()); // total
+
     let (hot_tier_files, remainder) = hot_tier_manager
         .get_hot_tier_manifest_files(stream, manifest_files.clone())
         .await
         .map_err(|err| DataFusionError::External(Box::new(err)))?;
     // Assign remaining entries back to manifest list
     // This is to be used for remote query
+    println!("hot_tier_files: {:?}", hot_tier_files.len()); // disk
+    println!("remainder: {:?}", remainder.len()); 
+
     *manifest_files = remainder;
 
     let hot_tier_files = hot_tier_files
