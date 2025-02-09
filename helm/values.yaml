@@ -4,11 +4,11 @@ parseable:
     tag: "v1.7.3"
     pullPolicy: Always
   ## object store can be local-store, s3-store, blob-store or gcs-store.
-  store: local-store
+  store: s3-store
   ## Set to true if you want to deploy Parseable in a HA mode (multiple ingestors + hot tier)
   ## Please note that highAvailability is not supported in local mode
   highAvailability:
-    enabled: false
+    enabled: true
     ingestor: 
       affinity: {}
         # podAntiAffinity:
@@ -72,12 +72,12 @@ parseable:
   persistence:
     staging:
       enabled: true
-      storageClass: ""
+      storageClass: "do-block-storage"
       accessMode: ReadWriteOnce
       size: 5Gi
     ingestor:
-      enabled: false
-      storageClass: ""
+      enabled: true
+      storageClass: "do-block-storage"
       accessMode: ReadWriteOnce
       size: 5Gi
     data:
@@ -88,8 +88,8 @@ parseable:
   ## enabling the disk on querier adds the hot-tier.
   ## local-store is not supported on hot-tier.
     querier:
-      enabled: false
-      storageClass: ""
+      enabled: true
+      storageClass: "do-block-storage"
       accessMode: ReadWriteOnce
       size: 100Gi
   ## comment out the secrets depending upon deployment option
@@ -121,7 +121,7 @@ parseable:
           - azr.container
           - azr.url
   s3ModeSecret:
-    enabled: false
+    enabled: true
     secrets:
       - name: parseable-env-secret
         prefix: P_
@@ -333,7 +333,7 @@ vector:
 # See fluent-bit helm documentation to learn more:
 # https://github.com/fluent/helm-charts/tree/main/charts/fluent-bit
 fluent-bit:
-  enabled: false
+  enabled: true
   kind: DaemonSet
   serverHost: parseable-ingestor-service.parseable.svc.cluster.local
   serverUsername: admin
@@ -343,7 +343,7 @@ fluent-bit:
   replicaCount: 1
   image:
     repository: parseable/fluent-bit
-    tag: "v2"
+    tag: "v3"
     pullPolicy: Always
   testFramework:
     enabled: true
@@ -359,6 +359,38 @@ fluent-bit:
     create: true
     nodeAccess: false
     eventsAccess: true
+  luaScripts:
+    extract_duration.lua: |
+      function extract_duration(tag, timestamp, record)
+        if record.statement then
+            -- Try to extract duration from the statement
+            local duration = record.statement:match("duration:%s*(%d+%.%d+)%s*ms")
+            if duration then
+                -- Add duration as a separate column
+                record.duration = duration
+                
+                -- Remove the duration line from statement
+                record.statement = record.statement:gsub("\n%d%d%d%d%-%d%d%-%d%d%s+%d%d:%d%d:%d%d%.%d%d%d%s+GMT%s+%[%d+%]%s+[^@]+@[^%s]+%s+LOG:%s+duration:%s+%d+%.%d+%s+ms$", "")
+            end
+          end
+          return 2, timestamp, record
+        end
+    clean_postgres_logs.lua: |
+      function clean_postgres_logs(tag, timestamp, record)
+          if record.log then
+              -- Remove container runtime prefixes and collect lines
+              local lines = {}
+              for line in record.log:gmatch("[^\n]+") do
+                  -- Remove the container runtime prefix
+                  local cleaned = line:gsub("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+Z%s+stderr%s+F%s+", "")
+                  lines[#lines + 1] = cleaned
+              end
+
+              -- Reconstruct the log without the runtime prefixes
+              record.log = table.concat(lines, "\n")
+          end
+          return 2, timestamp, record
+      end
   dnsPolicy: ClusterFirst
   service:
     type: ClusterIP
@@ -417,6 +449,15 @@ fluent-bit:
       #     Skip_Long_Lines On
 
       [INPUT]
+          Name tail
+          Path /var/log/containers/singhs-postgres-postgresql-*.log
+          Multiline.parser multiline-postgres
+          Tag raw.postgres
+          Mem_Buf_Limit 5MB
+          Read_from_head  true
+          Skip_Long_Lines Off
+
+      [INPUT]
           name kubernetes_events
           tag k8s_events
 
@@ -435,6 +476,25 @@ fluent-bit:
           Keep_Log            Off
           K8S-Logging.Parser  On
           K8S-Logging.Exclude On
+      
+      [FILTER]
+          Name            lua
+          Match           raw.postgres
+          Script          /fluent-bit/scripts/clean_postgres_logs.lua
+          Call            clean_postgres_logs
+
+      [FILTER]
+          Name            parser
+          Match           raw.postgres
+          Parser          postgres_structured
+          Key_Name        log
+          Reserve_Data    true
+
+      [FILTER]
+          Name            lua
+          Match           raw.postgres
+          Script          /fluent-bit/scripts/extract_duration.lua
+          Call            extract_duration
 
     ## https://docs.fluentbit.io/manual/pipeline/outputs
     outputs: |
@@ -455,7 +515,16 @@ fluent-bit:
           Server_Port 80
           Username {{ .Values.serverUsername }}
           Password {{ .Values.serverPassword }}
-          Stream k8s-events 
+          Stream k8s-events
+      
+      [OUTPUT]
+          Name parseable
+          Match raw.postgres
+          Server_Host {{ .Values.serverHost }}
+          Server_Port 80
+          Username {{ .Values.serverUsername }}
+          Password {{ .Values.serverPassword }}
+          Stream postgres-log23
 
     upstream: {}
 
@@ -466,6 +535,28 @@ fluent-bit:
           Time_Keep Off
           Time_Key time
           Time_Format %Y-%m-%dT%H:%M:%S.%L
+
+      [MULTILINE_PARSER]
+          name          multiline-postgres
+          type          regex
+          flush_timeout 5000
+          
+          # Start of a SQL statement
+          rule      "start_state"   "/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z (?:stderr|stdout) [A-Z] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} GMT \[(?<pid>\d+)\] (?<user>[^@]+)@(?<database>[^\s]+) LOG:\s+statement: (?<statement>.*)$/"    "collect_statement"
+          
+          # Any continuation line that starts with a tab
+          rule      "collect_statement"   "/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z (?:stderr|stdout) [A-Z]\s+\t(?<continuation>.*)$/"    "collect_statement"
+          
+          # Duration line that ends the statement
+          rule      "collect_statement"   "/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z (?:stderr|stdout) [A-Z] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} GMT \[(?<pid>\d+)\] (?<user>[^@]+)@(?<database>[^\s]+) LOG:\s+duration: (?<duration>\d+\.\d+) ms$/"    "start_state"
+
+      [PARSER]
+          Name          postgres_structured
+          Format        regex
+          Regex         ^(?<postgres_timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+GMT\s+\[(?<pid>\d+)\]\s+(?<user>[^@]+)@(?<database>[^\s]+)\s+LOG:\s+(?:statement:\s+(?<statement>(?:.|[\r\n])*(?:duration:.*ms)?)|(?<message>.*))$
+          Time_Key      postgres_timestamp
+          Time_Format   %Y-%m-%d %H:%M:%S.%L
+          Time_Keep     On
 
       # [PARSER]
       #     Name     nginx_error
