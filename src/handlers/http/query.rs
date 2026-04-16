@@ -43,7 +43,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinSet;
-use tracing::{error, warn};
+use tracing::{error, instrument, warn};
 
 use crate::event::{DEFAULT_TIMESTAMP_KEY, commit_schema};
 use crate::metrics::{QUERY_EXECUTE_TIME, increment_query_calls_by_date};
@@ -115,7 +115,33 @@ pub async fn get_records_and_fields(
     Ok((Some(records), Some(fields)))
 }
 
+#[instrument(
+    name = "POST /query",
+    skip(req, query_request),
+    err,
+    fields(
+        http.request.method = "POST",
+        http.route = "/query",
+        url.path = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
+        user_agent.original = tracing::field::Empty,
+        client.address = tracing::field::Empty,
+    )
+)]
 pub async fn query(req: HttpRequest, query_request: Query) -> Result<HttpResponse, QueryError> {
+    let span = tracing::Span::current();
+    span.record("url.path", req.path());
+    span.record(
+        "user_agent.original",
+        req.headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    span.record(
+        "client.address",
+        req.connection_info().realip_remote_addr().unwrap_or(""),
+    );
     let mut session_state = QUERY_SESSION.get_ctx().state();
     let time_range =
         TimeRange::parse_human_time(&query_request.start_time, &query_request.end_time)?;
@@ -179,6 +205,17 @@ pub async fn query(req: HttpRequest, query_request: Query) -> Result<HttpRespons
 ///
 /// # Returns
 /// - `HttpResponse` with the count result as JSON, including fields if requested.
+#[instrument(
+    name = "SELECT count",
+    skip(query_request, tenant_id),
+    err,
+    fields(
+        db.system.name = "datafusion",
+        db.collection.name = %table_name,
+        db.operation.name = "SELECT",
+        db.query.summary = "SELECT count",
+    )
+)]
 async fn handle_count_query(
     query_request: &Query,
     table_name: &str,
@@ -230,6 +267,17 @@ async fn handle_count_query(
 ///
 /// # Returns
 /// - `HttpResponse` with the full query result as a JSON object.
+#[instrument(
+    name = "SELECT batch",
+    skip(query, table_name, query_request, tenant_id),
+    err,
+    fields(
+        db.system.name = "datafusion",
+        db.collection.name = tracing::field::Empty,
+        db.operation.name = "SELECT",
+        db.query.summary = "SELECT batch",
+    )
+)]
 async fn handle_non_streaming_query(
     query: LogicalQuery,
     table_name: Vec<String>,
@@ -238,6 +286,7 @@ async fn handle_non_streaming_query(
     tenant_id: &Option<String>,
 ) -> Result<HttpResponse, QueryError> {
     let first_table_name = table_name[0].clone();
+    tracing::Span::current().record("db.collection.name", first_table_name.as_str());
     let (records, fields) = execute(query, query_request.streaming, tenant_id).await?;
     let records = match records {
         Either::Left(rbs) => rbs,
@@ -283,6 +332,17 @@ async fn handle_non_streaming_query(
 ///
 /// # Returns
 /// - `HttpResponse` streaming the query results as NDJSON, optionally prefixed with the fields array.
+#[instrument(
+    name = "SELECT stream",
+    skip(query, table_name, query_request, tenant_id),
+    err,
+    fields(
+        db.system.name = "datafusion",
+        db.collection.name = tracing::field::Empty,
+        db.operation.name = "SELECT",
+        db.query.summary = "SELECT stream",
+    )
+)]
 async fn handle_streaming_query(
     query: LogicalQuery,
     table_name: Vec<String>,
@@ -291,6 +351,7 @@ async fn handle_streaming_query(
     tenant_id: &Option<String>,
 ) -> Result<HttpResponse, QueryError> {
     let first_table_name = table_name[0].clone();
+    tracing::Span::current().record("db.collection.name", first_table_name.as_str());
     let (records_stream, fields) = execute(query, query_request.streaming, tenant_id).await?;
     let records_stream = match records_stream {
         Either::Left(_) => {
@@ -516,6 +577,13 @@ pub async fn update_schema_when_distributed(
 /// Create streams for querier if they do not exist
 /// get list of streams from memory and storage
 /// create streams for memory from storage if they do not exist
+#[instrument(
+    name = "create_streams_for_distributed",
+    skip(streams, tenant_id),
+    fields(
+        parseable.stream_count = streams.len(),
+    )
+)]
 pub async fn create_streams_for_distributed(
     streams: Vec<String>,
     tenant_id: &Option<String>,
@@ -579,6 +647,16 @@ impl FromRequest for Query {
     }
 }
 
+#[instrument(
+    name = "datafusion.create_logical_plan",
+    skip(query, session_state, time_range),
+    err,
+    fields(
+        db.system.name = "datafusion",
+        db.query.text = %query.query,
+        db.operation.name = "CREATE_LOGICAL_PLAN",
+    )
+)]
 pub async fn into_query(
     query: &Query,
     session_state: &SessionState,

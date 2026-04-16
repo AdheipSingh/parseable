@@ -272,6 +272,14 @@ impl Query {
     /// this function returns the result of the query
     /// if streaming is true, it returns a stream
     /// if streaming is false, it returns a vector of record batches
+    #[tracing::instrument(
+        name = "datafusion.execute",
+        skip(self, is_streaming, tenant_id),
+        fields(
+            db.system.name = "datafusion",
+            db.operation.name = "SELECT",
+        )
+    )]
     pub async fn execute(
         &self,
         is_streaming: bool,
@@ -526,6 +534,15 @@ impl CountsRequest {
     /// This function is supposed to read maninfest files for the given stream,
     /// get the sum of `num_rows` between the `startTime` and `endTime`,
     /// divide that by number of bins and return in a manner acceptable for the console
+    #[tracing::instrument(
+        name = "get_bin_density",
+        skip(self, tenant_id),
+        fields(
+            db.system.name = "datafusion",
+            db.collection.name = %self.stream,
+            db.operation.name = "SELECT",
+        )
+    )]
     pub async fn get_bin_density(
         &self,
         tenant_id: &Option<String>,
@@ -731,6 +748,13 @@ pub fn resolve_stream_names(sql: &str) -> Result<Vec<String>, anyhow::Error> {
     Ok(tables)
 }
 
+#[tracing::instrument(
+    name = "get_manifest_list",
+    skip(time_range, tenant_id),
+    fields(
+        db.collection.name = %stream_name,
+    )
+)]
 pub async fn get_manifest_list(
     stream_name: &str,
     time_range: &TimeRange,
