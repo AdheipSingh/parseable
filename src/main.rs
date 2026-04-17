@@ -98,10 +98,10 @@ async fn main() -> anyhow::Result<()> {
         parseable_server.await?;
     }
 
-    if let Some(provider) = otel_provider {
-        if let Err(e) = provider.shutdown() {
-            warn!("Failed to shut down OTel tracer provider: {:?}", e);
-        }
+    if let Some(provider) = otel_provider
+        && let Err(e) = provider.shutdown()
+    {
+        warn!("Failed to shut down OTel tracer provider: {:?}", e);
     }
 
     Ok(())
